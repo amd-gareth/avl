@@ -7,8 +7,11 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-import tabulate
 from cocotb.regression import RegressionManager
+
+from ._lazy import lazy_import
+
+tabulate = lazy_import("tabulate")
 
 # Monkey patching regression manager
 # Allows factory to be cleared between tests
@@ -22,6 +25,12 @@ def _patched_init_test(self):
 RegressionManager._init_test = _patched_init_test
 
 class Factory:
+    _empty = True
+    """True while no type or instance override has been registered. Object
+    creation checks this first and skips building an instance path entirely,
+    which is the common case for a testbench that does not use the factory.
+    """
+
     _by_type = {}
 
     _by_instance = {}
@@ -136,6 +145,7 @@ class Factory:
         Remove all factory entries
         """
 
+        Factory._empty = True
         Factory._by_type = {}
         Factory._by_instance = {}
         Factory._by_instance_regex = None
@@ -159,6 +169,7 @@ class Factory:
         """
         if original.__name__ not in Factory._by_type:
             Factory._by_type[original.__name__] = override
+        Factory._empty = False
 
     @staticmethod
     def set_override_by_instance(path: str, override: Any) -> None:
@@ -175,6 +186,7 @@ class Factory:
 
         # Compile patterns after adding a new override
         Factory._by_instance_regex, Factory._by_instance_overrides = (Factory._compile_regex(Factory._by_instance))
+        Factory._empty = False
 
     @staticmethod
     def get_by_type(original: type) -> type:

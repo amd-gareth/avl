@@ -3,14 +3,17 @@
 # Description:
 # Apheleia Verification Library Variable Class
 
+from __future__ import annotations
+
 import random
 import warnings
 from collections.abc import Callable, Hashable
 from typing import Any
 
-from z3 import BitVec, Or
-
+from ._lazy import lazy_import
 from .logic import Logic
+
+z3 = lazy_import("z3")
 
 
 class Enum(Logic):
@@ -71,13 +74,8 @@ class Enum(Logic):
         for k, v in values.items():
             setattr(self, k, v)
 
-        if value in values.keys():
-            self.value = values[value]
-        elif value in values.values():
-            self.value = value
-        else:
-            raise ValueError(f"Value {value} is not in the list of values {values}")
-
+        # _cast_ resolves a name or a value and raises if it is neither, so
+        # there is no need to check and assign the value here as well.
         super().__init__(value, auto_random=auto_random, fmt=fmt, width=max(values.values()).bit_length())
 
     def _cast_(self, other: Any) -> Any:
@@ -94,7 +92,7 @@ class Enum(Logic):
         if not isinstance(v, Hashable):
             v = int(v)
 
-        if v in self.values.keys():
+        if v in self.values:
             return self.values[v]
         elif v in self.values.values():
             return v
@@ -121,17 +119,20 @@ class Enum(Logic):
         """
         return (min(self.values.values()), max(self.values.values()))
 
-    def _z3_(self) -> BitVec:
+    def _z3_(self) -> z3.BitVec:
         """
         Return the Z3 representation of the variable.
         :return: The Z3 representation of the variable.
         :rtype: BoolRef | IntNumRef | BitVecNumRef | RatNumRef
         """
-        self.add_constraint(
-            "_c_range_",
-            lambda x: Or([x == v for v in self.values.values()]),
-            hard=True,
-        )
+        # Guarded, because a variable whose Z3 representation is asked for more
+        # than once would otherwise warn about overriding its own range.
+        if "_c_range_" not in self._constraints_[True]:
+            self.add_constraint(
+                "_c_range_",
+                lambda x: z3.Or([x == v for v in self.values.values()]),
+                hard=True,
+            )
         return super()._z3_()
 
     # Type Conversions

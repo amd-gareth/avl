@@ -11,13 +11,14 @@ import warnings
 from collections.abc import Callable, MutableMapping, MutableSequence, Set
 from typing import Any, TypeVar
 
-import tabulate
-from z3 import BitVecNumRef, Bool, BoolRef, IntNumRef, Optimize, Solver, fpToIEEEBV, is_fp, sat, z3util
-
+from ._lazy import lazy_import
 from .factory import Factory
 from .log import Log
 from .struct import Struct
 from .var import Var
+
+tabulate = lazy_import("tabulate")
+z3 = lazy_import("z3")
 
 def _var_finder_(obj: Any, memo: dict[int, Any], conversion: dict[Any, Any] = None, do_copy : bool=False, do_deepcopy : bool=False) -> Any:
     """
@@ -131,6 +132,65 @@ TObject = TypeVar("TObject", bound="Object")
 
 class Object:
 
+    # Defaults held on the class. Construction only writes the attributes that
+    # carry real per-object state; the rest are shared until something needs to
+    # change them.
+
+    _field_attributes_ = {}
+    """Empty per-field formatting and comparison settings, shared by every
+    object that has none of its own. ``_own_field_attributes_`` replaces
+    this with a per-instance copy before anything is added.
+    """
+
+    _constraints_ = {True: {}, False: {}}
+    """Empty hard and soft constraint dictionaries, shared by every object that
+    has none of its own. ``_own_constraints_`` replaces this with a
+    per-instance copy before anything is added.
+    """
+
+    _table_fmt_ = "grid"
+    """``tabulate`` table format used by ``str()``."""
+
+    _table_transpose_ = False
+    """Transpose the table produced by ``str()``."""
+
+    _table_recurse_ = True
+    """Recurse into nested objects when producing the table for ``str()``."""
+
+    _full_name_ = None
+    """The full name, remembered the first time it is asked for.
+
+    Established in ``__init__`` rather than on first use: several methods walk
+    ``self.__dict__`` and log while doing it, and a key appearing part way
+    through that would raise. Updating one that is already there does not.
+    """
+
+    def _own_field_attributes_(self) -> dict:
+        """
+        Return this object's own field attribute dictionary, creating it if the
+        object is still sharing the empty class-level default.
+
+        :return: The field attribute dictionary.
+        :rtype: dict
+        """
+        attributes = self._field_attributes_
+        if attributes is Object._field_attributes_:
+            attributes = self._field_attributes_ = {}
+        return attributes
+
+    def _own_constraints_(self) -> dict[bool, dict]:
+        """
+        Return this object's own constraint dictionaries, creating them if the
+        object is still sharing the empty class-level default.
+
+        :return: The hard and soft constraint dictionaries.
+        :rtype: dict[bool, dict]
+        """
+        constraints = self._constraints_
+        if constraints is Object._constraints_:
+            constraints = self._constraints_ = {True: {}, False: {}}
+        return constraints
+
     def __copy__(self) -> Object:
         cls = self.__class__
         new_obj = cls.__new__(cls)
@@ -193,6 +253,13 @@ class Object:
         # Validate we have required parameters
         if name is None:
             raise TypeError(f"{cls.__name__} requires 'name' parameter")
+
+        # Nothing is registered in the factory, so there is no override to look
+        # up and no need to build an instance path for one. This is the common
+        # case, and building the path means walking the whole parent chain.
+        if Factory._empty:
+            return super().__new__(cls)
+
         path = name
 
         # No factory for hidden Objects
@@ -221,17 +288,7 @@ class Object:
         """
         self.name = name
         self._parent_ = parent
-
-        # Field attributes
-        self._field_attributes_ = {}
-
-        # Randomness and constraints
-        self._constraints_ = {True : {}, False: {}}
-
-        # Table format for string representation
-        self._table_fmt_ = "grid"
-        self._table_transpose_ = False
-        self._table_recurse_ = True
+        self._full_name_ = None
 
     def __str__(self) -> str:
         """
@@ -309,6 +366,7 @@ class Object:
         :type name: str
         """
         self.name = name
+        self._full_name_ = None
 
     def get_name(self) -> str:
         """
@@ -323,13 +381,25 @@ class Object:
         """
         Get the full hierarchical name of the component.
 
+        Built once and remembered. An object is given its parent when it is
+        constructed and the hierarchy does not change afterwards, so this is
+        asked for far more often than it can change - it names the logger of
+        every message the object writes.
+
+        ``set_name`` and ``set_parent`` forget it again. They cannot forget it
+        for an object's descendants, which do not know their ancestors have
+        changed, so renaming a component that already has children is not
+        supported.
+
         :return: Full name of the component.
         :rtype: str
         """
-        if self._parent_ is not None:
-            return self._parent_.get_full_name() + "." + self.name
-        else:
-            return self.name
+        if self._full_name_ is None:
+            if self._parent_ is not None:
+                self._full_name_ = self._parent_.get_full_name() + "." + self.name
+            else:
+                self._full_name_ = self.name
+        return self._full_name_
 
     def set_parent(self, parent: Object|None) -> None:
         """
@@ -339,6 +409,7 @@ class Object:
         :type parent: Object, optional
         """
         self._parent_ = parent
+        self._full_name_ = None
 
     def get_parent(self) -> Object|None:
         """
@@ -360,7 +431,7 @@ class Object:
         :param compare: Whether to compare the field.
         :type compare: bool
         """
-        self._field_attributes_[name] = {"fmt": fmt, "compare": compare}
+        self._own_field_attributes_()[name] = {"fmt": fmt, "compare": compare}
 
     def get_field_attributes(self, name: str) -> dict[str, Any]:
         """
@@ -380,7 +451,7 @@ class Object:
         :param name: Field name.
         :type name: str
         """
-        del self._field_attributes_[name]
+        del self._own_field_attributes_()[name]
 
     def set_table_fmt(self, fmt: str|None = None, transpose : bool|None = None, recurse : bool|None = None) -> None:
         """
@@ -542,7 +613,7 @@ class Object:
         return retVal
 
     def add_constraint(
-        self, name: str, constraint: BoolRef, *args: Any, hard: bool = True, target: dict|None = None
+        self, name: str, constraint: z3.BoolRef, *args: Any, hard: bool = True, target: dict|None = None
     ) -> None:
         """
         Add a constraint to the object.
@@ -560,12 +631,13 @@ class Object:
         """
         # Add the constraint
         if target is None:
-            if name in self._constraints_[hard]:
+            constraints = self._own_constraints_()
+            if name in constraints[hard]:
                 warnings.warn(f"Overriding existing constraint : {name}",
                               UserWarning,
                               stacklevel=2)
 
-            self._constraints_[hard][name] = (constraint, [*args])
+            constraints[hard][name] = (constraint, [*args])
         else:
             if name in target[hard]:
                 warnings.warn(f"Overriding existing constraint : {name}",
@@ -585,6 +657,121 @@ class Object:
             if name in self._constraints_[t]:
                 del self._constraints_[t][name]
 
+    _FREE_BITS_AFTER_ = 4
+    """Randomizations of one constraint shape before the free bit analysis is
+    worth the solve it costs. An object randomized once - a sequence item,
+    typically - never pays for it; a loop randomizing the same object pays once.
+    """
+
+    _free_bits_cache_ = None
+    """The free bit analysis of this object's constraints, once it has been made.
+
+    Held per object rather than globally: the analysis is made over this object's
+    own Z3 variables, and keeping it here means the expressions it was keyed by
+    stay alive for exactly as long as the answer does. None until the object is
+    first randomized - see ``_free_bits_``.
+    """
+
+    def _free_bits_(self, assertions : list, vars : list) -> dict[int, list[int]]|None:
+        """
+        The bits of each variable that the hard constraints leave a choice about.
+
+        Randomization asks every bit, softly, to match a random draw. A bit the
+        constraints pin to one value can never be traded against anything - its
+        clause is either satisfied in every solution or violated in every one - so
+        dropping it moves every candidate's cost by the same amount and leaves the
+        distribution exactly as it was. What it does change is how much the search
+        has to carry: constraints that hold a 32 bit field to a few thousand values
+        pin most of its bits.
+
+        Only the hard constraints decide this, and only the object's own: a
+        constraint passed to randomize() can pin further bits but never unpin one,
+        so an answer worked out without them stays correct, and stays reusable
+        across calls that pass different ones.
+
+        :param assertions: The object's hard constraints, as Z3 expressions.
+        :type assertions: list
+        :param vars: The variables taking part in the solve.
+        :type vars: list
+        :return: The free bits of each variable, keyed by its Z3 expression id, or
+            None to ask about every bit. A variable present with an empty list is
+            pinned outright and gets no clauses at all.
+        :rtype: dict[int, list[int]], optional
+        """
+        # Only bit vectors can be taken apart this way; a float's Z3 variable is
+        # a float, and is randomized through its IEEE pattern instead.
+        sized = [v for v in vars if isinstance(v._rand_, z3.BitVecRef)]
+        if not sized:
+            return None
+
+        # Identity of the constraint shape. A constraint whose arguments include a
+        # variable that is not being randomized has that variable's current value
+        # built into it, so the same lambdas do not always give the same
+        # expressions - the ids are what notice.
+        key = (tuple(sorted(e.get_id() for e in assertions)),
+               tuple(v._rand_.get_id() for v in sized))
+
+        entry = self._free_bits_cache_
+        if entry is None or entry["key"] != key:
+            # First sighting of this shape. The expressions are kept because the
+            # key is made of their ids, and Z3 reuses the id of an expression that
+            # has been collected.
+            self._free_bits_cache_ = {"key": key, "exprs": assertions,
+                                      "count": 1, "free": None}
+            return None
+
+        if entry["free"] is None:
+            entry["count"] += 1
+            if entry["count"] <= self._FREE_BITS_AFTER_:
+                return None
+            entry["free"] = self._pinned_bits_(assertions, sized)
+
+        return entry["free"]
+
+    @staticmethod
+    def _pinned_bits_(assertions : list, vars : list) -> dict[int, list[int]]|None:
+        """
+        Ask Z3 which bits its constraints force, and report the rest.
+
+        Every bit is named with a boolean and the question asked once for all of
+        them, because asking bit by bit costs an order of magnitude more.
+
+        :param assertions: The hard constraints, as Z3 expressions.
+        :type assertions: list
+        :param vars: The variables to examine, all of them bit vectors.
+        :type vars: list
+        :return: The free bits of each variable, keyed by its Z3 expression id, or
+            None if the question could not be answered.
+        :rtype: dict[int, list[int]], optional
+        """
+        solver = z3.Solver()
+        solver.add(assertions)
+
+        labels = {}
+        for v in vars:
+            rand = v._rand_
+            for b in range(v.width):
+                label = f"_fb_{rand}_{b}"
+                labels[label] = (rand.get_id(), b)
+                solver.add(z3.Bool(label) == (z3.Extract(b, b, rand) == 1))
+
+        status, implied = solver.consequences([], [z3.Bool(name) for name in labels])
+        if status != z3.sat:
+            return None
+
+        forced = set()
+        for implication in implied:
+            literal = implication.arg(1)
+            if literal.decl().name() == "not":
+                literal = literal.arg(0)
+            forced.add(str(literal))
+
+        free = {v._rand_.get_id(): [] for v in vars}
+        for label, (rand_id, bit) in labels.items():
+            if label not in forced:
+                free[rand_id].append(bit)
+        return free
+
     def pre_randomize(self) -> None:
         """
         Pre-randomization function.
@@ -597,7 +784,7 @@ class Object:
         """
         pass
 
-    def randomize(self, hard: list[BoolRef]|None = None, soft: list[BoolRef]|None = None) -> None:
+    def randomize(self, hard: list[z3.BoolRef]|None = None, soft: list[z3.BoolRef]|None = None) -> None:
         """
         This method randomizes the value of the variable by considering hard and soft constraints.
         It uses an optimization solver to find a suitable value that satisfies the constraints.
@@ -626,10 +813,10 @@ class Object:
                 constrained_vars[a._idx_] = a
                 return a._rand_
 
-        def new_solver() -> Optimize:
+        def new_solver() -> z3.Optimize:
             nonlocal vars, constrained_vars
 
-            solver = Optimize()
+            solver = z3.Optimize()
 
             def is_solver_var(a : Any) -> bool:
                 return isinstance(a, Var) and a._auto_random_ and a._idx_ in var_ids
@@ -657,7 +844,7 @@ class Object:
 
         def cast(solver):
             cast_values = {}
-            if solver.check() == sat:
+            if solver.check() == z3.sat:
                 model = solver.model()
                 for var in model.decls():
                     try:
@@ -668,29 +855,29 @@ class Object:
                     if v is not None:
                         val = model.eval(var(), model_completion=True)
 
-                        if is_fp(val):
-                            bv = model.eval(fpToIEEEBV(val))
+                        if z3.is_fp(val):
+                            bv = model.eval(z3.fpToIEEEBV(val))
                             cast_values[v._idx_] = bv
-                        elif isinstance(val, IntNumRef| BitVecNumRef):
+                        elif isinstance(val, z3.IntNumRef| z3.BitVecNumRef):
                             cast_values[v._idx_] = val.as_long()
                         else:
                             cast_values[v._idx_] = val
             else:
                 msg = "Failed to randomize\n"
                 if os.environ.get("AVL_CONSTRAINT_DEBUG") is not None:
-                    s = Solver()
+                    s = z3.Solver()
                     assertions = list(solver.assertions())
-                    trackers = [Bool(f"p{i}") for i in range(len(assertions))]
+                    trackers = [z3.Bool(f"p{i}") for i in range(len(assertions))]
 
                     for t, c in zip(trackers, assertions, strict=True):
                         s.assert_and_track(c, t)
 
-                    if s.check() != sat:
+                    if s.check() != z3.sat:
                         core = s.unsat_core()
                         for t in core:
                             idx = int(str(t)[1:])
                             constraint = assertions[idx]
-                            vars_in_constraint = z3util.get_vars(constraint)
+                            vars_in_constraint = z3.z3util.get_vars(constraint)
 
                             msg += f"\tCONFLICTING CONSTRAINT: {constraint}\n"
                             for v in vars_in_constraint:
@@ -727,6 +914,11 @@ class Object:
         # Create Solver
         solver = new_solver()
 
+        # Which bits are worth a randomization clause. Taken before the dynamic
+        # constraints are added, so that the answer holds across calls that pass
+        # different ones - see _free_bits_.
+        free_bits = self._free_bits_(list(solver.assertions()), list(constrained_vars.values()))
+
         # Add dynamic constraints
         if hard is not None:
             for c in hard:
@@ -739,6 +931,11 @@ class Object:
                 fn, *args = c
                 _args = [resolve_arg(a) for a in args]
                 solver.add_soft(fn(*_args), weight=1000)
+
+        # Spread the variables over their legal values
+        for v in constrained_vars.values():
+            v._apply_randomization_(
+                solver, None if free_bits is None else free_bits.get(v._rand_.get_id()))
 
         # Add randomization and solve
         solver.push()

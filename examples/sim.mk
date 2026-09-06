@@ -6,13 +6,15 @@
 # Makefile
 
 # HDL source files
-VERILOG_SOURCES      += $(PWD)/rtl/example_hdl.sv
+VERILOG_SOURCES      += $(CURDIR)/rtl/example_hdl.sv
 VERILOG_INCLUDE_DIRS +=
 COMPILE_ARGS         +=
 
 # TOPLEVEL is the name of the toplevel module in your Verilog or VHDL file
 TOPLEVEL             := example_hdl
-PYTHONPATH           := $(PWD)/cocotb
+PYTHONPATH           := $(CURDIR)/cocotb$(if $(PYTHONPATH),:$(PYTHONPATH))
+# cocotb >= 2.0 no longer exports PYTHONPATH from its own makefiles
+export PYTHONPATH
 
 # MODULE is the basename of the Python test file(s)
 MODULE               ?= example
