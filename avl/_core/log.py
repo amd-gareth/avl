@@ -101,14 +101,6 @@ class Log:
 
         if len(Log._logdata["Time"]) >= Log._flush_level:
             Log._flush_log()
-            Log._logdata = {
-                "Time": [],
-                "Level": [],
-                "Group": [],
-                "Message": [],
-                "Filename": [],
-                "LineNo": [],
-            }
 
     @staticmethod
     def _override_cocotb_logging() -> None:
@@ -172,7 +164,7 @@ class Log:
         The log data is converted to a pandas DataFrame before writing.
         """
 
-        if Log._logfile is not None:
+        if Log._logfile is not None and len(Log._logdata["Time"]) > 0:
             fileext = os.path.splitext(Log._logfile)[1]
             d = pd.DataFrame(Log._logdata)
             mode = "w" if Log._first else "a"
@@ -205,6 +197,7 @@ class Log:
                 raise ValueError(f"Unsupported file extension {fileext}")
 
             Log._first = False
+            Log._logdata = {"Time": [], "Level": [], "Group": [], "Message": [], "Filename": [], "LineNo": []}
 
     @staticmethod
     def set_logfile(logfile: str) -> None:
