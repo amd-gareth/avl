@@ -190,16 +190,27 @@ class Log:
                     )
             elif fileext == ".txt":
                 with open(Log._logfile, mode) as f:
+                    if not Log._first:
+                        f.write("\n\n")
                     f.write(
                         tabulate.tabulate(d.values.tolist(), headers=d.columns, tablefmt="grid")
                     )
             elif fileext == ".md":
+                # Only the first flush renders the header/separator row - later
+                # flushes append bare rows so the file stays one valid table
+                # instead of several concatenated ones.
                 with open(Log._logfile, mode) as f:
-                    markdown_view = d.to_markdown(index=False)
-                    assert markdown_view is not None
-                    f.write(markdown_view)
+                    if Log._first:
+                        markdown_view = d.to_markdown(index=False)
+                        assert markdown_view is not None
+                        f.write(markdown_view)
+                    else:
+                        rows = "\n".join("| " + " | ".join(str(v) for v in row) + " |" for row in d.values.tolist())
+                        f.write("\n" + rows)
             elif fileext == ".rst":
                 with open(Log._logfile, mode) as f:
+                    if not Log._first:
+                        f.write("\n\n")
                     f.write(tabulate.tabulate(d, headers="keys", tablefmt="rst", showindex=False))
             else:
                 raise ValueError(f"Unsupported file extension {fileext}")
